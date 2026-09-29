@@ -1,0 +1,11 @@
+# 运行痕迹（含本机路径与账号信息，勿发布）
+monitor.log
+state.json
+*.log
+*.pid
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env

@@ -1,0 +1,25 @@
+{
+  "poll_interval_seconds": 30,
+  "zone": {
+    "sidebar_max_fraction": 0.3,
+    "bottom_fraction": 0.22
+  },
+  "rules": {
+    "any_of": ["3亿", "三亿"],
+    "all_of": [
+      ["活动", "领取"],
+      ["领取", "Token"],
+      ["领取", "token"],
+      ["领取", "体验套餐"],
+      ["活动", "体验套餐"],
+      ["免费", "领取"]
+    ]
+  },
+  "alert": {
+    "realert_minutes": 30,
+    "max_alerts_per_day": 8,
+    "confirm_scans": 2
+  },
+  "schedules": [],
+  "url_checks": []
+}
