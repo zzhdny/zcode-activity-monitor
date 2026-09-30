@@ -5,7 +5,7 @@
     "bottom_fraction": 0.22
   },
   "rules": {
-    "any_of": ["领取", "3亿", "三亿", "福利"],
+    "any_of": ["领取", "Token", "亿", "GLM-5.3-Flash", "Global Build", "福利"],
     "all_of": [
       ["活动", "体验套餐"]
     ]

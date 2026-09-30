@@ -51,8 +51,10 @@ DEFAULT_CONFIG = {
     },
     "rules": {
         # 满足任意一条即判定活动出现（该区域平时只有账号栏等固定界面，
-        # 任务列表已被排除，单关键词是安全的）
-        "any_of": ["领取", "3亿", "三亿", "福利"],
+        # 任务列表已被排除，单关键词是安全的）。
+        # 关键词来自 2026-09-30 实拍卡片：Global Build / 100,000,000
+        # Tokens / GLM-5.3-Flash / 领取
+        "any_of": ["领取", "Token", "亿", "GLM-5.3-Flash", "Global Build", "福利"],
         # 组合词：两个词同时出现才提醒，进一步降误报
         "all_of": [
             ["活动", "体验套餐"],
@@ -460,12 +462,16 @@ def install_startup():
 def acquire_single_instance():
     """保证只有一个常驻实例（多实例会互抢 state.json、重复提醒）。"""
     import msvcrt
-    fh = open(BASE / "monitor.lock", "w")
+    # 用追加模式打开，避免第二个实例打开文件时清掉第一个实例写入的 PID
+    fh = open(BASE / "monitor.lock", "a")
     try:
         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
+        fh.close()
         print("已有监视器实例在运行（monitor.lock 被占用），本次退出。")
         sys.exit(0)
+    fh.seek(0)
+    fh.truncate()
     fh.write(str(os.getpid()))
     fh.flush()
     return fh  # 持有到进程退出，锁自动释放；进程崩溃时系统也会释放
