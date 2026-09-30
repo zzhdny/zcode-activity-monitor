@@ -50,16 +50,12 @@ DEFAULT_CONFIG = {
         "bottom_fraction": 0.22,
     },
     "rules": {
-        # 满足任意一条即判定活动出现
-        "any_of": ["3亿", "三亿"],
-        # 组合词：区域内同时出现两个词才算（降低误报），组合词一律要求含"领取"
+        # 满足任意一条即判定活动出现（该区域平时只有账号栏等固定界面，
+        # 任务列表已被排除，单关键词是安全的）
+        "any_of": ["领取", "3亿", "三亿", "福利"],
+        # 组合词：两个词同时出现才提醒，进一步降误报
         "all_of": [
-            ["活动", "领取"],
-            ["领取", "Token"],
-            ["领取", "token"],
-            ["领取", "体验套餐"],
             ["活动", "体验套餐"],
-            ["免费", "领取"],
         ],
     },
     "alert": {
@@ -332,7 +328,8 @@ def maybe_alert(cfg, state, reason, hwnd, confirmed=True, detail=""):
         state["pending"] = pending
         save_state(state)
         if pending["count"] < need:
-            log.info("疑似活动（第 %d/%d 次命中），待确认：%s", pending["count"], need, reason)
+            log.info("疑似活动（第 %d/%d 次命中），待确认：%s | 区域文本：%s",
+                     pending["count"], need, reason, (detail or "")[:400])
             return False
 
     signature = reason
@@ -416,7 +413,13 @@ def scan_once(cfg, state, alert_enabled=True):
     if texts is None:
         log.debug("侧边栏折叠或窗口不可用，本轮未扫描")
         return "no_zone"
-    log.debug("活动区域文本：%s", texts)
+    # 飞行记录：区域文本一有变化就记进日志，便于事后诊断漏报
+    prev = state.get("last_zone_texts")
+    if prev != texts:
+        log.info("活动区域文本变化：%s", texts)
+        state["last_zone_texts"] = texts
+        save_state(state)
+    reason = match_rules(texts, cfg)
     reason = match_rules(texts, cfg)
     if reason:
         if alert_enabled:
@@ -452,6 +455,20 @@ def install_startup():
     print(f"已写入开机自启：{vbs}")
     print(f"启动命令：\"{pythonw}\" \"{BASE / 'monitor.py'}\"")
     print("如需取消自启，删除该 .vbs 文件即可。")
+
+
+def acquire_single_instance():
+    """保证只有一个常驻实例（多实例会互抢 state.json、重复提醒）。"""
+    import msvcrt
+    fh = open(BASE / "monitor.lock", "w")
+    try:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        print("已有监视器实例在运行（monitor.lock 被占用），本次退出。")
+        sys.exit(0)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh  # 持有到进程退出，锁自动释放；进程崩溃时系统也会释放
 
 
 def main():
@@ -490,6 +507,7 @@ def main():
         }.get(result, f"扫描结果：未知状态 {result}"))
         return
 
+    _lock = acquire_single_instance()
     while True:
         try:
             scan_once(cfg, state)
