@@ -1,5 +1,5 @@
 {
-  "poll_interval_seconds": 30,
+  "poll_interval_seconds": 20,
   "zone": {
     "sidebar_max_fraction": 0.3,
     "bottom_fraction": 0.22

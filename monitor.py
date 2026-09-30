@@ -42,7 +42,7 @@ log = logging.getLogger("zcode-monitor")
 # ---------------------------------------------------------------- config
 
 DEFAULT_CONFIG = {
-    "poll_interval_seconds": 30,
+    "poll_interval_seconds": 20,
     "zone": {
         # 侧边栏右边界：优先取"调整侧边栏宽度"分隔条位置，找不到时用窗口宽度比例兜底
         "sidebar_max_fraction": 0.30,
@@ -250,24 +250,30 @@ def scan_window(win, cfg):
     z = cfg["zone"]
     items, divider = [], None
     suppress_depth = None
+    suppress_reason = None
     try:
         for c, depth in uia.WalkControl(win, includeTop=True, maxDepth=30):
             if suppress_depth is not None and depth > suppress_depth:
-                continue  # ListItem 的子孙节点
-            suppress_depth = None
+                continue  # 被剪枝元素的子孙节点
+            suppress_depth = suppress_reason = None
             try:
                 name = (c.Name or "").strip()
                 r = c.BoundingRectangle
             except Exception:
                 continue
             if c.ControlTypeName == "ListItemControl" and r.height() > 0:
-                suppress_depth = depth
+                suppress_depth, suppress_reason = depth, "listitem"
                 continue
             if not name or r.width() <= 0 or r.height() <= 0:
                 continue
             if name == "调整侧边栏宽度" and divider is None:
                 if r.height() >= 600:
                     divider = r  # 分隔条纵贯整个窗口内容区
+            elif divider is not None and r.left >= divider.right:
+                # 主区域（聊天/编辑器）占元素大头且与活动无关，
+                # DFS 一进入分隔条右侧就整棵剪掉
+                suppress_depth, suppress_reason = depth, "main-area"
+                continue
             items.append((name, r))
     except Exception as e:
         log.debug("遍历控件树中断（窗口可能正在变化）：%s", e)
@@ -294,6 +300,57 @@ def scan_window(win, cfg):
     except Exception:
         pass
     return texts, hwnd
+
+
+def scan_popup(pw):
+    """扫描悬浮窗/弹窗的全部文本（无区域几何，靠规则与二次确认防误报）。"""
+    texts, suppress_depth = [], None
+    try:
+        for c, depth in uia.WalkControl(pw, includeTop=True, maxDepth=20):
+            if suppress_depth is not None and depth > suppress_depth:
+                continue
+            suppress_depth = None
+            try:
+                name = (c.Name or "").strip()
+                r = c.BoundingRectangle
+            except Exception:
+                continue
+            if c.ControlTypeName == "ListItemControl" and r.height() > 0:
+                suppress_depth = depth
+                continue
+            if name and r.width() > 0 and r.height() > 0:
+                texts.append(name)
+    except Exception as e:
+        log.debug("悬浮窗扫描中断：%s", e)
+    return texts
+
+
+def find_zcode_popups(main_win):
+    """主窗口之外、属于 ZCode 进程的顶层窗口（悬浮卡片/弹窗/菜单）。"""
+    pids = zcode_pids()
+    if not pids:
+        return []
+    try:
+        main_hwnd = main_win.NativeWindowHandle
+    except Exception:
+        main_hwnd = None
+    out = []
+    try:
+        root = uia.GetRootControl()
+        for w in root.GetChildren():
+            try:
+                if w.ProcessId not in pids or w.ClassName != "Chrome_WidgetWin_1":
+                    continue
+                if main_hwnd and w.NativeWindowHandle == main_hwnd:
+                    continue
+                r = w.BoundingRectangle
+                if r.width() > 80 and r.height() > 60:
+                    out.append(w)
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug("枚举悬浮窗失败：%s", e)
+    return out
 
 
 def match_rules(texts, cfg):
@@ -412,21 +469,37 @@ def scan_once(cfg, state, alert_enabled=True):
         log.debug("ZCode 客户端未运行或窗口未找到")
         return "no_window"
     texts, hwnd = scan_window(win, cfg)
+    detail = []
     if texts is None:
-        log.debug("侧边栏折叠或窗口不可用，本轮未扫描")
-        return "no_zone"
-    # 飞行记录：区域文本一有变化就记进日志，便于事后诊断漏报
-    prev = state.get("last_zone_texts")
-    if prev != texts:
-        log.info("活动区域文本变化：%s", texts)
-        state["last_zone_texts"] = texts
-        save_state(state)
+        log.debug("侧边栏折叠或窗口不可用，本轮仅扫描悬浮窗")
+        texts = []
+    else:
+        # 飞行记录：区域文本一有变化就记进日志，便于事后诊断漏报
+        prev = state.get("last_zone_texts")
+        if prev != texts:
+            log.info("活动区域文本变化：%s", texts)
+            state["last_zone_texts"] = texts
+            save_state(state)
+        detail = list(texts)
     reason = match_rules(texts, cfg)
-    reason = match_rules(texts, cfg)
+    if not reason:
+        # 主窗口没命中，再查 ZCode 的悬浮卡片/弹窗（独立顶层窗口）
+        for pw in find_zcode_popups(win):
+            ptexts = scan_popup(pw)
+            if not ptexts:
+                continue
+            reason = match_rules(ptexts, cfg)
+            if reason:
+                detail = ptexts
+                try:
+                    hwnd = pw.NativeWindowHandle
+                except Exception:
+                    hwnd = None
+                break
     if reason:
         if alert_enabled:
             maybe_alert(cfg, state, reason, hwnd, confirmed=False,
-                        detail=" | ".join(texts))
+                        detail=" | ".join(detail))
         else:
             log.info("检测到活动（提醒已关闭）：%s", reason)
         return "hit"
