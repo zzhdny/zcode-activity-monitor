@@ -59,6 +59,15 @@ DEFAULT_CONFIG = {
         "all_of": [
             ["活动", "体验套餐"],
         ],
+        # 结构性卡片规则：有的卡片内容整块渲染为图片，UIA 树里只剩一个
+        # 卡片尺寸的大按钮（如实测的"打开" 354x144）+ 角上"关闭"小按钮，
+        # 关键词完全匹配不到。此规则不依赖文字，按"侧边栏底部区出现卡片
+        # 尺寸的大按钮"判定；这种大按钮平时在该区域不存在，误报风险低。
+        "card": {
+            "button_names": ["打开", "领取", "去领取", "立即领取", "点击领取", "查看"],
+            "min_width": 200,
+            "min_height": 90,
+        },
     },
     "alert": {
         "realert_minutes": 30,   # 同一活动重复提醒的间隔
@@ -238,7 +247,10 @@ def find_zcode_window():
 # ---------------------------------------------------------------- scan
 
 def scan_window(win, cfg):
-    """扫描 ZCode 窗口侧边栏底部活动区，返回 (文本列表, hwnd)。
+    """扫描 ZCode 窗口侧边栏底部活动区，返回 (文本列表, hwnd, 元素列表)。
+
+    元素列表为 (名称, 矩形, 控件类型) 三元组，供结构性卡片识别
+    （detect_card）使用——卡片内容为图片时 UIA 只剩按钮名和尺寸。
 
     以"调整侧边栏宽度"分隔条为参照系：它的左缘≈侧边栏右边界，
     顶部≈窗口顶部，高度≈窗口内容高度。实测最小化时所有元素坐标
@@ -274,17 +286,17 @@ def scan_window(win, cfg):
                 # DFS 一进入分隔条右侧就整棵剪掉
                 suppress_depth, suppress_reason = depth, "main-area"
                 continue
-            items.append((name, r))
+            items.append((name, r, c.ControlTypeName))
     except Exception as e:
         log.debug("遍历控件树中断（窗口可能正在变化）：%s", e)
 
     if divider is None:
-        return None, None  # 侧边栏已折叠或窗口不可用，本次无法定位活动区
+        return None, None, None  # 侧边栏已折叠或窗口不可用，本次无法定位活动区
 
     top, height, right = divider.top, divider.height(), divider.left
     bottom = top + height * (1 - z["bottom_fraction"])
-    texts = []
-    for name, r in items:
+    texts, zone_items = [], []
+    for name, r, ctype in items:
         if name == "调整侧边栏宽度":
             continue
         # 完全在参照区之外（被裁剪到可视区外）的元素不算
@@ -293,18 +305,22 @@ def scan_window(win, cfg):
         cx, cy = (r.left + r.right) / 2, (r.top + r.bottom) / 2
         if cx < right and cy > bottom:
             texts.append(name)
+            zone_items.append((name, r, ctype))
 
     hwnd = None
     try:
         hwnd = win.NativeWindowHandle
     except Exception:
         pass
-    return texts, hwnd
+    return texts, hwnd, zone_items
 
 
 def scan_popup(pw):
-    """扫描悬浮窗/弹窗的全部文本（无区域几何，靠规则与二次确认防误报）。"""
-    texts, suppress_depth = [], None
+    """扫描悬浮窗/弹窗的全部文本与元素，返回 (文本列表, 元素列表)。
+
+    无区域几何，靠规则与二次确认防误报；元素列表供结构性卡片识别。
+    """
+    texts, items, suppress_depth = [], [], None
     try:
         for c, depth in uia.WalkControl(pw, includeTop=True, maxDepth=20):
             if suppress_depth is not None and depth > suppress_depth:
@@ -320,9 +336,10 @@ def scan_popup(pw):
                 continue
             if name and r.width() > 0 and r.height() > 0:
                 texts.append(name)
+                items.append((name, r, c.ControlTypeName))
     except Exception as e:
         log.debug("悬浮窗扫描中断：%s", e)
-    return texts
+    return texts, items
 
 
 def find_zcode_popups(main_win):
@@ -366,6 +383,38 @@ def match_rules(texts, cfg):
     if not hits:
         return None
     return "；命中规则：" + "、".join(sorted(set(hits)))
+
+
+def detect_card(items, cfg, require_close=False):
+    """结构性卡片识别（不依赖卡片文字）。
+
+    卡片内容整块渲染为图片时，UIA 树里只剩一个卡片尺寸的大按钮
+    （如"打开" 354x144）和角上的"关闭"小按钮。返回命中描述或 None。
+    require_close=True 时还要求大按钮内部有一个"关闭"小按钮
+    （悬浮窗扫描用：弹窗里的大按钮未必是活动卡片，需更多佐证）。
+    """
+    card_cfg = cfg["rules"].get("card") or {}
+    names = set(card_cfg.get("button_names") or ["打开", "领取"])
+    min_w = float(card_cfg.get("min_width", 200))
+    min_h = float(card_cfg.get("min_height", 90))
+    for name, r, ctype in items:
+        if name not in names or ctype != "ButtonControl":
+            continue
+        if r.width() < min_w or r.height() < min_h:
+            continue
+        if require_close:
+            has_close = False
+            for n2, r2, t2 in items:
+                if n2 != "关闭" or r2.width() > 60 or r2.height() > 60:
+                    continue
+                cx2, cy2 = (r2.left + r2.right) / 2, (r2.top + r2.bottom) / 2
+                if r.left <= cx2 <= r.right and r.top <= cy2 <= r.bottom:
+                    has_close = True
+                    break
+            if not has_close:
+                continue
+        return f"；命中规则：卡片大按钮「{name}」{r.width()}x{r.height()}"
+    return None
 
 
 # ---------------------------------------------------------------- alerts
@@ -468,11 +517,11 @@ def scan_once(cfg, state, alert_enabled=True):
     if win is None:
         log.debug("ZCode 客户端未运行或窗口未找到")
         return "no_window"
-    texts, hwnd = scan_window(win, cfg)
-    detail = []
+    texts, hwnd, items = scan_window(win, cfg)
+    detail, strong = [], False
     if texts is None:
         log.debug("侧边栏折叠或窗口不可用，本轮仅扫描悬浮窗")
-        texts = []
+        texts, items = [], []
     else:
         # 飞行记录：区域文本一有变化就记进日志，便于事后诊断漏报
         prev = state.get("last_zone_texts")
@@ -483,13 +532,21 @@ def scan_once(cfg, state, alert_enabled=True):
         detail = list(texts)
     reason = match_rules(texts, cfg)
     if not reason:
+        card = detect_card(items, cfg)
+        if card:
+            # 结构性卡片命中不需要二次确认（大按钮不是瞬时弹窗那种形态）
+            reason, strong = card, True
+    if not reason:
         # 主窗口没命中，再查 ZCode 的悬浮卡片/弹窗（独立顶层窗口）
         for pw in find_zcode_popups(win):
-            ptexts = scan_popup(pw)
+            ptexts, pitems = scan_popup(pw)
             if not ptexts:
                 continue
             reason = match_rules(ptexts, cfg)
-            if reason:
+            card = detect_card(pitems, cfg, require_close=True)
+            if reason or card:
+                if card:
+                    reason, strong = card, True
                 detail = ptexts
                 try:
                     hwnd = pw.NativeWindowHandle
@@ -498,7 +555,7 @@ def scan_once(cfg, state, alert_enabled=True):
                 break
     if reason:
         if alert_enabled:
-            maybe_alert(cfg, state, reason, hwnd, confirmed=False,
+            maybe_alert(cfg, state, reason, hwnd, confirmed=strong,
                         detail=" | ".join(detail))
         else:
             log.info("检测到活动（提醒已关闭）：%s", reason)

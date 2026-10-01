@@ -8,7 +8,12 @@
     "any_of": ["领取", "Token", "亿", "GLM-5.3-Flash", "Global Build", "福利"],
     "all_of": [
       ["活动", "体验套餐"]
-    ]
+    ],
+    "card": {
+      "button_names": ["打开", "领取", "去领取", "立即领取", "点击领取", "查看"],
+      "min_width": 200,
+      "min_height": 90
+    }
   },
   "alert": {
     "realert_minutes": 30,
